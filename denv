@@ -1,0 +1,399 @@
+#!/usr/bin/python3
+
+# PROJECT INFO
+# Name:      Denv
+# Author:    Steffen Haase
+# Copyright: 2019-2021 Steffen Haase <shworx.development@gmail.com>
+
+# DESCRIPTION
+# This tool is for an easier handling of docker containers.
+# The main task of this tool is to start/stop all docker container with the
+# given container prefix, without doing it manually for each container. It
+# handles also the stopping/starting of eventual installed Apache, Nginx and
+# MySQL server which can block the ports for the indoleads docker environment.
+
+# LICENSE: GNU General Public License (GPL) v3.0
+
+# ========  IMPORTS  ========
+import os
+import psutil
+import subprocess
+from optparse import OptionParser
+from signal import signal, SIGINT
+from sys import exit
+
+
+# ========  CLASSES  ========
+class BColors:
+    # ==== COLORS ====
+    WARNING = '\033[93m'  # light yellow
+    ERROR = '\033[91m'  # light red
+    BLUE = '\033[34m'
+    LIGHTBLUE = '\033[94m'
+    LIGHTGREEN = '\033[92m'
+    CYAN = '\033[36m'
+    DEFAULTCOLOR = '\033[39m'
+    # ==== STYLES ====
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+    DEFAULT = '\033[0m'
+
+
+# ========  END OF CLASSES  ========
+
+# ========  FUNCTIONS  ========
+def printErrorMsg(msg, bold=False, prefix=True, startNewline=False, endNewline=True):
+    output = BColors.ERROR + msg + BColors.DEFAULT
+    output = BColors.BOLD + output + BColors.DEFAULT if bold else output
+    output = BColors.ERROR + BColors.BOLD + "ERROR: " + BColors.DEFAULT + output if prefix else output
+    output = "\n" + output if startNewline else output
+    if endNewline:
+        print(output)
+    else:
+        print(output, end="")
+
+
+def printWarningMsg(msg, bold=False, prefix=True, startNewline=False, endNewline=True):
+    output = BColors.WARNING + msg + BColors.DEFAULT
+    output = BColors.BOLD + output + BColors.DEFAULT if bold else output
+    output = BColors.WARNING + BColors.BOLD + "WARNING: " + BColors.DEFAULT + output if prefix else output
+    output = "\n" + output if startNewline else output
+    if endNewline:
+        print(output)
+    else:
+        print(output, end="")
+
+
+def printSuccessMsg(msg, bold=False, startNewline=False, endNewline=True):
+    output = BColors.LIGHTGREEN + msg + BColors.DEFAULT
+    output = BColors.BOLD + output + BColors.DEFAULT if bold else output
+    output = "\n" + output if startNewline else output
+    if endNewline:
+        print(output)
+    else:
+        print(output, end="")
+
+
+def printToolMsg(msg, bold=False, startNewline=False, endNewline=True):
+    output = BColors.CYAN + msg + BColors.DEFAULT
+    output = BColors.BOLD + output + BColors.DEFAULT if bold else output
+    output = "\n" + output if startNewline else output
+    if endNewline:
+        print(output)
+    else:
+        print(output, end="")
+
+
+def printMsg(msg, bold=False, startNewline=False, endNewline=True):
+    output = BColors.BOLD + msg + BColors.DEFAULT if bold else msg
+    output = "\n" + output if startNewline else output
+    if endNewline:
+        print(output)
+    else:
+        print(output, end="")
+
+
+def getContainerIDs(prefix, running=False):
+    if running:
+        cmd = "docker ps -q -f 'name=" + prefix + "'"
+    else:
+        cmd = "docker ps -a -q -f 'name=" + prefix + "'"
+    result = os.popen(cmd).read()
+    container = result.split("\n")
+    del container[-1]
+    return container
+
+
+def getContainerNames(prefix, running=False):
+    if running:
+        cmd = "docker ps --format '{{.Names}}' -f 'name=" + prefix + "'"
+    else:
+        cmd = "docker ps -a --format '{{.Names}}' -f 'name=" + prefix + "'"
+
+    result = os.popen(cmd).read()
+    container = result.split("\n")
+    del container[-1]
+    return container
+
+
+def getContainerName(containerId):
+    cmd = "docker ps -a --format '{{.Names}}' -f 'id=" + containerId + "'"
+    result = os.popen(cmd).read()
+    return result.rstrip()
+
+
+def getContainer(prefix, running=False):
+    containerIDs = getContainerIDs(prefix, running)
+    containerNames = getContainerNames(prefix, running)
+    container = []
+
+    k = 0
+    for i in containerIDs:
+        container.append([i.strip(), containerNames[k].strip()])
+        k += 1
+    return container
+
+
+def startContainer(prefix, container):
+    printToolMsg("Starting \"" + prefix + "\" docker container ...", startNewline=True)
+    flag = True
+    for i in container:
+        printMsg("Starting {:<35} ({}) {:>5} ".format(i[1], i[0], "..."), endNewline=False)
+        result = os.popen("docker start {}".format(i[0])).read()
+        if result.strip() != i[0]:
+            printWarningMsg("WARNING", bold=True, prefix=False)
+            flag = False
+        else:
+            printSuccessMsg("done")
+    if not flag:
+        printWarningMsg("There are some issues encountered due starting of the containers!")
+
+
+def getNotRunningContainer(prefix):
+    container = getContainerIDs(prefix)
+    runningIds = getContainerIDs(prefix, True)
+    result = [item for item in container if item not in runningIds]
+    return result
+
+
+def checkRunningContainerAndStartMissingContainer(prefix):
+    result = getNotRunningContainer(prefix)
+    failed = len(result)
+    if failed > 0:
+        printWarningMsg("{} container are not started, try to start again ...".format(failed))
+        for containerId in result:
+            name = getContainerName(containerId)
+            printMsg("Starting {:<35} ({}) {:>5} ".format(name, containerId, "..."), endNewline=False)
+            result = os.popen("docker start {}".format(containerId)).read()
+            if result.strip() != containerId:
+                printWarningMsg("WARNING", bold=True, prefix=False)
+            else:
+                printSuccessMsg("done")
+        result = getNotRunningContainer(prefix)
+        k = len(result)
+        if k > 0:
+            printWarningMsg("{} container was not able to start!\nList of not running container:\n".format(k))
+            print(*result, sep="\n")
+        else:
+            printSuccessMsg("All container running!")
+    else:
+        printSuccessMsg("All container running!")
+
+
+def stopContainer(prefix, container):
+    printToolMsg("Stopping \"" + prefix + "\" docker container ...", startNewline=True)
+    flag = True
+    for i in container:
+        printMsg("Stopping {:<35} ({}) {:>5} ".format(i[1], i[0], "..."), endNewline=False)
+        result = os.popen("docker stop {}".format(i[0])).read()
+        if result.strip() != i[0]:
+            printErrorMsg("FAILED", prefix=False)
+            flag = False
+        else:
+            printSuccessMsg("done")
+    if flag:
+        printToolMsg("All container stopped!")
+    else:
+        printErrorMsg("Can't stop one (or more) container!")
+
+
+def check_sudo():
+    try:
+        subprocess.check_output("sudo -nv 2>&1", shell=True)
+    except subprocess.CalledProcessError:
+        return False
+    return True
+
+
+def prompt_sudo():
+    ret = 0
+    if os.geteuid() != 0:
+        msg = "[sudo] password for %u:"
+        try:
+            ret = subprocess.check_call("sudo -v -p '%s'" % msg, shell=True)
+        except subprocess.CalledProcessError:
+            return 1
+    return ret
+
+
+def checkIfProcessRunning(processName):
+    for proc in psutil.process_iter():
+        try:
+            if processName.lower() in proc.name().lower():
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+    return False
+
+
+def toggleService(serviceName, start=True):
+    cmd = ""
+    action = "start" if start else "stop"
+    if serviceName == "apache2":
+        cmd = "sudo service apache2 {}".format(action)
+    if serviceName == "nginx":
+        cmd = "sudo service nginx {}".format(action)
+    elif serviceName == "mysql":
+        cmd = "sudo service mysql {}".format(action)
+    else:
+        printErrorMsg("Unknown service \"{}\"!".format(serviceName))
+    if not check_sudo():
+        if prompt_sudo() != 0:
+            printErrorMsg("You don't have sudo privilege!")
+            return 1
+    try:
+        subprocess.check_call(cmd, shell=True)
+    except subprocess.CalledProcessError:
+        return False
+    return True
+
+
+def handler(signal_received, frame):
+    # Handle any cleanup here
+    printWarningMsg('SIGINT or CTRL-C detected. Exiting gracefully', prefix=False, startNewline=True)
+    exit(0)
+# ========  END OF FUNCTIONS  ========
+
+
+# ========  MAIN LOGIC  ========
+def main():
+    parser = OptionParser(usage="usage: %prog [OPTION]... [prefix] [start|stop]", version="%prog version 1.4")
+    parser.add_option("--apache", "-a",
+                      action="store_true", dest="apache", default=False,
+                      help="turns the Apache handler ON")
+    parser.add_option("--nginx", "-n",
+                      action="store_true", dest="nginx", default=False,
+                      help="turns the Nginx handler ON")
+    parser.add_option("--mysql", "-m",
+                      action="store_true", dest="mysql", default=False,
+                      help="turns the MySQL handler ON")
+    parser.add_option("--no_warnings", "-w",
+                      action="store_true", dest="nowarnings", default=False,
+                      help="turns the warning messages OFF")
+
+    (options, args) = parser.parse_args()
+    if len(args) < 2:
+        parser.error("Please provide the container prefix and the start|stop argument!")
+    prefix = args[0]
+    action = args[1]
+
+    signal(SIGINT, handler)
+    printSuccessMsg('Press CTRL+C to exit.')
+
+    if action == "start":
+        if options.apache or options.nginx or options.mysql:
+            printToolMsg("Check for running webserver (Apache/Nginx) and MySQL server and stopping them ...",
+                         startNewline=True)
+
+        flag = True
+        if options.apache:
+            if checkIfProcessRunning("apache2"):
+                if not options.nowarnings:
+                    printWarningMsg("Apache server is still running.")
+                printMsg("{:<61} ... ".format("Stopping the Apache server"), endNewline=False)
+                if toggleService("apache2", start=False):
+                    printSuccessMsg("done")
+                else:
+                    printErrorMsg("FAILED", prefix=False)
+                    flag = False
+
+        if options.nginx:
+            if checkIfProcessRunning("nginx"):
+                if not options.nowarnings:
+                    printWarningMsg("Nginx server is still running.")
+                printMsg("{:<61} ... ".format("Stopping the Nginx server"), endNewline=False)
+                if toggleService("nginx", start=False):
+                    printSuccessMsg("done")
+                else:
+                    printErrorMsg("FAILED", prefix=False)
+                    flag = False
+
+        if options.mysql:
+            if checkIfProcessRunning("mysql"):
+                if not options.nowarnings:
+                    printWarningMsg("MySQL server is still running.")
+                printMsg("{:<61} ... ".format("Stopping the MySQL server"), endNewline=False)
+                if toggleService("mysql", start=False):
+                    printSuccessMsg("done")
+                else:
+                    printErrorMsg("FAILED", prefix=False)
+                    flag = False
+            if options.apache and options.mysql and not flag:
+                printErrorMsg("Can't stop Apache2 or MySQL server!")
+                exit()
+            elif options.nginx and options.mysql and not flag:
+                printErrorMsg("Can't stop Apache2 or MySQL server!")
+                exit()
+            elif options.apache and not flag:
+                printErrorMsg("Can't stop Apache2 webserver!")
+                exit()
+            elif options.nginx and not flag:
+                printErrorMsg("Can't stop Nginx webserver!")
+                exit()
+            elif options.mysql and not flag:
+                printErrorMsg("Can't stop MySQL server!")
+                exit()
+
+        containers = getContainer(prefix + "_")
+        if not containers:
+            containers = getContainer(prefix + "-")
+        if not containers:
+            printErrorMsg("Can't find any container with this name prefix!")
+            exit()
+
+        startContainer(prefix, containers)
+        checkRunningContainerAndStartMissingContainer(prefix)
+    elif action == "stop":
+        containers = getContainer(prefix + "_", True)
+        if not containers:
+            containers = getContainer(prefix + "-", True)
+        if not containers:
+            printErrorMsg("Can't find any container with this name prefix!")
+            exit()
+
+        stopContainer(prefix, getContainer(prefix, True))
+
+        if options.apache and options.mysql:
+            printToolMsg("Starting Apache2 webserver and MySQL server again ...", startNewline=True)
+        elif options.nginx and options.mysql:
+            printToolMsg("Starting Nginx webserver and MySQL server again ...", startNewline=True)
+        elif options.apache:
+            printToolMsg("Starting Apache2 webserver again ...", startNewline=True)
+        elif options.nginx:
+            printToolMsg("Starting Nginx webserver again ...", startNewline=True)
+        elif options.mysql:
+            printToolMsg("Starting MySQL server again ...", startNewline=True)
+
+        if options.apache:
+            if not checkIfProcessRunning("apache2"):
+                printMsg("{:<61} ... ".format("Starting the Apache server"), endNewline=False)
+                if toggleService("apache2"):
+                    printSuccessMsg("done")
+                else:
+                    printErrorMsg("FAILED", prefix=False)
+                    printErrorMsg("Can't start Apache2 webserver!")
+
+        if options.nginx:
+            if not checkIfProcessRunning("nginx"):
+                printMsg("{:<61} ... ".format("Starting the Nginx server"), endNewline=False)
+                if toggleService("nginx"):
+                    printSuccessMsg("done")
+                else:
+                    printErrorMsg("FAILED", prefix=False)
+                    printErrorMsg("Can't start Nginx webserver!")
+
+        if options.mysql:
+            if not checkIfProcessRunning("mysql"):
+                printMsg("{:<61} ... ".format("Starting the MySQL server"), endNewline=False)
+                if toggleService("mysql"):
+                    printSuccessMsg("done")
+                else:
+                    printErrorMsg("FAILED", prefix=False)
+                    printErrorMsg("Can't start MySQL server!")
+    else:
+        printErrorMsg("Unsupported argument (start|stop)!");
+# ========  END OF MAIN LOGIC  ========
+
+
+if __name__ == "__main__":
+    main()
